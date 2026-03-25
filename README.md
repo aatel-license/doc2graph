@@ -1,5 +1,5 @@
 # 📊 doc2graph
-
+![Alt text](https://github.com/aatel-license/doc2graph/blob/main/image.png "doc2graph")
 **doc2graph** automatically extracts a structured **knowledge graph** from any document and generates an interactive **HTML/CSS/JS visualizer inspired by Neo4j**.
 
 It supports multiple formats and works with any **OpenAI-compatible LLM** (LM Studio, Ollama, OpenAI, etc.) via `.env`.
