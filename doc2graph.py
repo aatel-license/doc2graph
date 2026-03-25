@@ -5,6 +5,8 @@ e genera un visualizzatore HTML/CSS/JS interattivo stile Neo4j.
 
 Formati supportati: .txt .md .pdf .docx .doc .epub .odt .rtf .csv .json
 Utilizza un LLM OpenAI-compatible (LM-Studio, Ollama, OpenAI…) via .env
+
+MULTI-FILE: passa più file o glob come argomenti → unico grafo unificato.
 """
 
 import os
@@ -49,11 +51,6 @@ client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 
 def _resolve_model() -> str:
-    """
-    Risolve il nome del modello da usare:
-    1. Se LLM_MODEL è impostato nel .env → usalo direttamente
-    2. Altrimenti interroga /v1/models e prende il primo disponibile
-    """
     global LLM_MODEL
     if LLM_MODEL:
         return LLM_MODEL
@@ -214,10 +211,6 @@ def _pandoc_to_text(path: Path) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def split_into_chunks(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """
-    Divide il testo in chunk con overlap per preservare il contesto
-    ai confini tra chunk adiacenti ed evitare relazioni spezzate.
-    """
     chunks = []
     start = 0
     while start < len(text):
@@ -236,7 +229,7 @@ def split_into_chunks(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. PROMPT DI ESTRAZIONE (vincolato con evidence)
+# 4. PROMPT DI ESTRAZIONE
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Sei un esperto di knowledge graph e Neo4j.
@@ -305,7 +298,6 @@ REGOLE CRITICHE SULLE RELAZIONI:
 6. NON aggiungere IS_A, PART_OF, INSTANCE_OF se non scritti nel testo.
 """
 
-# Usato nella fase di arricchimento post-merge
 ENRICH_PROMPT = """Sei un esperto di knowledge graph.
 Ricevi un JSON con nodes e edges estratti da un documento.
 
@@ -489,12 +481,6 @@ def safe_parse_llm_json(raw: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
-    """
-    Wrapper di chiamata LLM con:
-    - auto-discovery modello se LLM_MODEL è vuoto
-    - retry su risposta vuota (il modello non ha generato nulla)
-    - backoff esponenziale su errori di rete
-    """
     import time
     model = _resolve_model()
 
@@ -508,19 +494,12 @@ def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
             )
             raw = response.choices[0].message.content
 
-            # ── Risposta vuota o None ─────────────────────────────────────
             if not raw or not raw.strip():
                 finish = response.choices[0].finish_reason or "?"
                 print(f"\n   ⚠️  Risposta vuota (tentativo {attempt}/{LLM_RETRY}) finish_reason={finish}")
                 if finish == "length":
                     print(f"      → max_tokens ({max_tokens}) troppo basso. "
                           f"Aumenta LLM_MAX_TOKENS nel .env")
-                elif finish in ("stop", None, "?"):
-                    print(f"      → Il modello non ha generato output. "
-                          f"Possibili cause:")
-                    print(f"         • Testo troppo lungo per la context window del modello")
-                    print(f"         • Modello non istruito per output JSON (prova un modello instruct)")
-                    print(f"         • LM-Studio non ha il modello caricato correttamente")
                 if attempt < LLM_RETRY:
                     wait = 2 ** attempt
                     print(f"      → Ritento tra {wait}s...", flush=True)
@@ -532,31 +511,11 @@ def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
         except Exception as e:
             err_str = str(e)
             print(f"\n   ❌  Errore LLM (tentativo {attempt}/{LLM_RETRY}): {err_str}")
-
-            # Diagnosi specifica degli errori comuni
-            if "Connection refused" in err_str or "connect" in err_str.lower():
-                print(f"      → Server non raggiungibile su {LLM_BASE_URL}")
-                print(f"         Avvia LM-Studio e premi 'Start Server'")
-            elif "model" in err_str.lower() and "not found" in err_str.lower():
-                print(f"      → Modello '{model}' non trovato.")
-                print(f"         Modelli disponibili:")
-                try:
-                    avail = [m.id for m in client.models.list().data]
-                    for mid in avail:
-                        print(f"           • {mid}")
-                    print(f"         Imposta LLM_MODEL=<nome> nel .env")
-                except Exception:
-                    pass
-            elif "context" in err_str.lower() or "too long" in err_str.lower():
-                print(f"      → Testo troppo lungo per la context window.")
-                print(f"         Riduci CHUNK_SIZE nel .env (attuale: {CHUNK_SIZE})")
-
             if attempt < LLM_RETRY:
                 wait = 2 ** attempt
                 print(f"      → Ritento tra {wait}s…", flush=True)
                 time.sleep(wait)
 
-    # Tutti i tentativi falliti
     return ""
 
 
@@ -591,14 +550,10 @@ def llm_extract_graph(text_chunk: str, chunk_idx: int, total: int) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. NORMALIZZAZIONE LABEL (per deduplicazione robusta)
+# 7. NORMALIZZAZIONE LABEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def normalize_label(label: str) -> str:
-    """
-    Normalizza la label per deduplicare varianti dello stesso nodo:
-    case, accenti, punteggiatura, spazi multipli.
-    """
     s = label.strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = re.sub(r"[^\w\s]", "", s)
@@ -614,6 +569,7 @@ def merge_graphs(graph_list: list[dict]) -> dict:
     """
     Unisce più grafi parziali disambiguando gli id dei nodi.
     Usa normalize_label per evitare duplicati da varianti ortografiche.
+    Funziona sia per chunk dello stesso documento sia per documenti diversi.
     """
     all_nodes: dict[str, dict] = {}
     all_edges: list[dict] = []
@@ -661,15 +617,10 @@ def merge_graphs(graph_list: list[dict]) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. POST-PROCESSING: prune + dedup
+# 9. POST-PROCESSING: prune + dedup + enrich
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prune_graph(graph: dict) -> dict:
-    """
-    - Rimuove archi con source/target inesistenti
-    - Rimuove self-loop
-    - Deduplicazione archi (stesso source+target+type)
-    """
     valid_ids = {n["id"] for n in graph["nodes"]}
 
     clean_edges = [
@@ -696,10 +647,6 @@ def prune_graph(graph: dict) -> dict:
 
 
 def llm_verify_relations(graph: dict, sample_size: int = 20) -> dict:
-    """
-    Chiede al LLM di validare un campione di relazioni e rimuove quelle dubbie.
-    Opzionale: attiva con --verify nella CLI o chiamando direttamente la funzione.
-    """
     if not graph["edges"]:
         return graph
 
@@ -741,7 +688,6 @@ Relazioni:
     return graph
 
 
-# Tipi di relazione generici da intercettare e migliorare
 GENERIC_TYPES = {
     "RELAZIONATO_A", "CONNESSO_A", "ASSOCIATO_A", "COLLEGATO_A", "MENZIONA",
     "HA_RELAZIONE", "E_CONNESSO", "APPARTIENE", "RIFERITO_A", "LEGATO_A",
@@ -750,13 +696,8 @@ GENERIC_TYPES = {
 
 
 def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
-    """
-    Passa al LLM gli edge con tipo generico o label mancante per arricchirli.
-    Lavora in batch per non sforare il context window.
-    """
     node_map = {n["id"]: n["label"] for n in graph["nodes"]}
 
-    # Individua gli edge da migliorare
     to_enrich_idx = [
         i for i, e in enumerate(graph["edges"])
         if e.get("type", "").upper() in GENERIC_TYPES
@@ -796,7 +737,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
             if not result:
                 continue
 
-            # Il modello può rispondere con {"edges":[...]} o direttamente [...]
             improved = result.get("edges", result) if isinstance(result, dict) else result
             if not isinstance(improved, list):
                 continue
@@ -804,7 +744,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
             for item in improved:
                 orig_idx = item.get("_idx")
                 if orig_idx is None:
-                    # fallback: abbina per posizione nel batch
                     pos = improved.index(item)
                     if pos < len(batch_idx):
                         orig_idx = batch_idx[pos]
@@ -816,7 +755,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
                 new_label = item.get("label", e.get("label", "")).strip()
                 new_props = item.get("properties", e.get("properties", {}))
 
-                # Applica solo se il tipo è effettivamente migliorato
                 if new_type and new_type not in GENERIC_TYPES:
                     e["type"] = new_type
                     enriched += 1
@@ -935,7 +873,7 @@ header{{display:flex;align-items:center;justify-content:space-between;
 .hl{{display:flex;align-items:center;gap:10px}}
 .logo{{font-size:17px;font-weight:700;color:#00C9A7;display:flex;align-items:center;gap:6px}}
 .logo svg{{width:26px;height:26px}}
-.dtitle{{font-size:12px;color:var(--dim);border-left:1px solid var(--border);padding-left:10px;max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.dtitle{{font-size:12px;color:var(--dim);border-left:1px solid var(--border);padding-left:10px;max-width:400px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .badge{{font-size:11px;color:var(--dim);background:var(--panel2);padding:3px 10px;border-radius:20px}}
 .hr{{display:flex;gap:7px;align-items:center}}
 .btn{{cursor:pointer;padding:5px 13px;border:none;border-radius:6px;font-size:12px;font-weight:600;transition:.15s}}
@@ -1116,12 +1054,6 @@ function fitView() {{
   ty=ph/2-(minY+maxY)/2*scale;
 }}
 
-function loop() {{
-  if(physicsOn) stepPhysics();
-  draw();
-  requestAnimationFrame(loop);
-}}
-
 function stepPhysics() {{
   const vis = nodes.filter(n => !n.hidden);
   if (vis.length < 2) return;
@@ -1135,59 +1067,36 @@ function stepPhysics() {{
   for (let i = 0; i < vis.length; i++) {{
     for (let j = i + 1; j < vis.length; j++) {{
       const a = vis[i], b = vis[j];
-
       let dx = b.x - a.x;
       let dy = b.y - a.y;
-
       const d2 = dx * dx + dy * dy + 1;
       const f = REPULSION / d2;
       const d = Math.sqrt(d2);
-
-      dx /= d;
-      dy /= d;
-
-      a.vx -= f * dx;
-      a.vy -= f * dy;
-      b.vx += f * dx;
-      b.vy += f * dy;
+      dx /= d; dy /= d;
+      a.vx -= f * dx; a.vy -= f * dy;
+      b.vx += f * dx; b.vy += f * dy;
     }}
   }}
 
   edges.forEach(e => {{
     if (e.source.hidden || e.target.hidden) return;
-
     const dx = e.target.x - e.source.x;
     const dy = e.target.y - e.source.y;
-
     const d = Math.sqrt(dx * dx + dy * dy) + 0.01;
     const f = SPRING_K * (d - SPRING_L);
-
-    const fx = f * dx / d;
-    const fy = f * dy / d;
-
-    e.source.vx += fx;
-    e.source.vy += fy;
-    e.target.vx -= fx;
-    e.target.vy -= fy;
+    const fx = f * dx / d; const fy = f * dy / d;
+    e.source.vx += fx; e.source.vy += fy;
+    e.target.vx -= fx; e.target.vy -= fy;
   }});
 
-  vis.forEach(n => {{
-    n.vx -= n.x * GRAVITY;
-    n.vy -= n.y * GRAVITY;
-  }});
-
+  vis.forEach(n => {{ n.vx -= n.x * GRAVITY; n.vy -= n.y * GRAVITY; }});
   vis.forEach(n => {{
     if (n === dragNode || n.pinned) return;
-
-    n.vx *= DAMP;
-    n.vy *= DAMP;
-
-    n.x += n.vx;
-    n.y += n.vy;
+    n.vx *= DAMP; n.vy *= DAMP;
+    n.x += n.vx; n.y += n.vy;
   }});
 }}
 
-// ── Colori per tipo di arco ──────────────────────────────────────────────────
 const EDGE_PALETTE = [
   "#57C7E3","#6DCE9E","#FFC454","#DA7194","#C990C0",
   "#F79767","#4FC1E0","#A0D568","#FFCE54","#ED5565",
@@ -1203,7 +1112,6 @@ function getEdgeColor(type) {{
   return edgeColorMap[type];
 }}
 
-// Precalcola bend index per archi paralleli (stesso source+target o inversi)
 const edgeBendIndex = (() => {{
   const pairCount = {{}};
   const pairSeq   = {{}};
@@ -1230,26 +1138,22 @@ function drawEdge(e, sel) {{
   const col  = sel ? "#FFA500" : getEdgeColor(e.type);
   const NODE_R = 22 * scale;
   const ux = dx / len, uy = dy / len;
-  // punti di attacco al bordo dei cerchi
   const ax = sx + ux * NODE_R, ay = sy + uy * NODE_R;
   const bx = ex - ux * NODE_R, by = ey - uy * NODE_R;
 
-  // curvatura: archi paralleli si divaricano, singoli curvano leggermente
   const total = e._bendTotal || 1;
   const idx   = e._bendIdx   || 0;
-  // offset perpendicolare: distribuisce i paralleli da -max a +max
   const maxBend = 40 * scale;
   let bend;
   if (total === 1) {{
-    bend = Math.min(28 * scale, len * 0.12); // curva leggera di default
+    bend = Math.min(28 * scale, len * 0.12);
   }} else {{
     bend = (idx - (total - 1) / 2) * (maxBend * 2 / Math.max(total - 1, 1));
   }}
-  const px = -uy, py = ux; // perpendicolare
+  const px = -uy, py = ux;
   const mx = (ax + bx) / 2, my = (ay + by) / 2;
   const cpx = mx + px * bend, cpy = my + py * bend;
 
-  // ── linea curva ─────────────────────────────────────────────────────────
   ctx.beginPath();
   ctx.moveTo(ax * DPR, ay * DPR);
   ctx.quadraticCurveTo(cpx * DPR, cpy * DPR, bx * DPR, by * DPR);
@@ -1259,8 +1163,6 @@ function drawEdge(e, sel) {{
   ctx.stroke();
   ctx.globalAlpha = 1.0;
 
-  // ── punta freccia alla fine della curva ──────────────────────────────────
-  // tangente alla Bézier in t=1: direzione da cp a b
   const tx2 = bx - cpx, ty2 = by - cpy;
   const tlen = Math.sqrt(tx2 * tx2 + ty2 * ty2) || 1;
   const tux = tx2 / tlen, tuy = ty2 / tlen;
@@ -1276,31 +1178,22 @@ function drawEdge(e, sel) {{
   ctx.fill();
   ctx.globalAlpha = 1.0;
 
-  // ── label arco (pill con sfondo) ────────────────────────────────────────
-  if (scale < 0.3) return; // troppo zoom-out per leggere
+  if (scale < 0.3) return;
 
-  // punto medio sulla curva (t=0.5 della quadratica)
   const lx = 0.25 * ax + 0.5 * cpx + 0.25 * bx;
   const ly = 0.25 * ay + 0.5 * cpy + 0.25 * by;
-
   const typeFS  = Math.max(9, Math.min(12, 11 * scale));
   const labelFS = Math.max(8, Math.min(10,  9 * scale));
 
   ctx.textAlign    = "center";
   ctx.textBaseline = "middle";
-
-  // type: sfondo pill
   ctx.font = `600 ${{typeFS * DPR}}px Inter,sans-serif`;
   const tw  = ctx.measureText(e.type).width;
   const ph2 = typeFS * DPR * 1.4;
   const pw2 = tw + 10 * DPR;
   const pr  = ph2 / 2;
-  // pill background
   ctx.beginPath();
-  ctx.roundRect(
-    (lx * DPR) - pw2 / 2, ly * DPR - ph2 / 2,
-    pw2, ph2, pr
-  );
+  ctx.roundRect((lx * DPR) - pw2 / 2, ly * DPR - ph2 / 2, pw2, ph2, pr);
   ctx.fillStyle   = sel ? "rgba(255,140,0,0.88)" : `${{col}}cc`;
   ctx.shadowColor = "rgba(0,0,0,0.5)";
   ctx.shadowBlur  = 4 * DPR;
@@ -1309,7 +1202,6 @@ function drawEdge(e, sel) {{
   ctx.fillStyle  = "#fff";
   ctx.fillText(e.type, lx * DPR, ly * DPR);
 
-  // label leggibile sotto, solo se c'è spazio
   if (e.label && scale > 0.6) {{
     const labelY = ly + typeFS * scale * 1.6;
     ctx.font      = `italic ${{labelFS * DPR}}px Inter,sans-serif`;
@@ -1328,8 +1220,6 @@ function worldToScreen(x,y){{ return [x*scale+tx, y*scale+ty]; }}
 
 function draw() {{
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // archi non selezionati prima, poi quelli selezionati sopra
   edges.forEach(e => {{
     if (e.source.hidden || e.target.hidden) return;
     const sel = !!(selectedNode && (e.source === selectedNode || e.target === selectedNode));
@@ -1366,7 +1256,6 @@ function draw() {{
       ctx.fillStyle="rgba(255,255,255,0.55)";
       ctx.fillText(n.type,sx*DPR,(sy+NODE_R*scale+10)*DPR);
     }}
-    // indicatore pin
     if(n.pinned){{
       ctx.beginPath();
       ctx.arc((sx+NODE_R*scale*0.7)*DPR,(sy-NODE_R*scale*0.7)*DPR,4*DPR,0,Math.PI*2);
@@ -1375,15 +1264,13 @@ function draw() {{
   }});
 }}
 
-// ── stato interazione ───────────────────────────────────────────────────────
 let dragNode=null, dragOffX=0, dragOffY=0;
 let panStart=null, panTx=0, panTy=0;
 let selectedNode=null;
-let mouseDownNode=null;   // nodo su cui è partito il mousedown
-let mouseDownPos=null;    // posizione schermo del mousedown
-let didDrag=false;        // true se il mouse si è spostato abbastanza → è un drag, non un click
-
-const DRAG_THRESHOLD=4;  // pixel di movimento minimo per considerarlo drag
+let mouseDownNode=null;
+let mouseDownPos=null;
+let didDrag=false;
+const DRAG_THRESHOLD=4;
 
 function loop() {{
   if(physicsOn) stepPhysics();
@@ -1424,7 +1311,6 @@ canvas.addEventListener("mousedown",e=>{{
   didDrag=false;
   if(n){{
     mouseDownNode=n;
-    // prepara offset per il drag, ma non attiva ancora dragNode
     const [wx,wy]=screenToWorld(sx,sy);
     dragOffX=wx-n.x; dragOffY=wy-n.y;
   }} else {{
@@ -1436,8 +1322,6 @@ canvas.addEventListener("mousedown",e=>{{
 canvas.addEventListener("mousemove",e=>{{
   const r=canvas.getBoundingClientRect();
   const sx=e.clientX-r.left, sy=e.clientY-r.top;
-
-  // Attiva drag solo dopo DRAG_THRESHOLD pixel di spostamento
   if(mouseDownNode && !dragNode){{
     const dist=Math.hypot(sx-mouseDownPos.x, sy-mouseDownPos.y);
     if(dist>DRAG_THRESHOLD){{
@@ -1446,24 +1330,18 @@ canvas.addEventListener("mousemove",e=>{{
       canvas.classList.add("dragging");
     }}
   }}
-
   if(dragNode){{
     const [wx,wy]=screenToWorld(sx,sy);
-    dragNode.x=wx-dragOffX;
-    dragNode.y=wy-dragOffY;
-    // pinned: azzera velocità così quando physics è ON non lo risucchia subito
+    dragNode.x=wx-dragOffX; dragNode.y=wy-dragOffY;
     dragNode.vx=0; dragNode.vy=0;
     dragNode.pinned=true;
     document.getElementById("tip").style.display="none";
     return;
   }}
-
   if(panStart){{
     tx=panTx+(sx-panStart.x); ty=panTy+(sy-panStart.y);
     return;
   }}
-
-  // tooltip hover
   const n=nodeAt(sx,sy);
   const tip=document.getElementById("tip");
   if(n){{
@@ -1497,9 +1375,7 @@ canvas.addEventListener("mousemove",e=>{{
 
 canvas.addEventListener("mouseup",e=>{{
   canvas.classList.remove("dragging");
-  dragNode=null;
-  panStart=null;
-  // Se NON era un drag → è un click: seleziona/deseleziona nodo
+  dragNode=null; panStart=null;
   if(!didDrag){{
     const r=canvas.getBoundingClientRect();
     const n=nodeAt(e.clientX-r.left, e.clientY-r.top);
@@ -1509,7 +1385,6 @@ canvas.addEventListener("mouseup",e=>{{
   mouseDownNode=null;
 }});
 
-// Doppio click su nodo → toglie il pin (lo rilascia alla fisica)
 canvas.addEventListener("dblclick",e=>{{
   const r=canvas.getBoundingClientRect();
   const n=nodeAt(e.clientX-r.left, e.clientY-r.top);
@@ -1560,19 +1435,16 @@ function togglePhys(){{
   const btn=document.getElementById("btn-phys");
   btn.textContent=physicsOn?"Physics ON":"Physics OFF";
   btn.classList.toggle("active",physicsOn);
-  // quando si riattiva, azzera le velocità dei pinned così non esplodono
   if(physicsOn) nodes.forEach(n=>{{ if(n.pinned){{ n.vx=0;n.vy=0; }} }});
 }}
 function unpinAll(){{ nodes.forEach(n=>{{ n.pinned=false;n.vx=0;n.vy=0; }}); }}
 function resetView(){{ fitView(); }}
 function showAll(){{ nodes.forEach(n=>n.hidden=false);fitView(); }}
-
 function search(q){{
   q=q.toLowerCase().trim();
   nodes.forEach(n=>{{ n.hidden=q?!n.label.toLowerCase().includes(q):false;n.highlighted=false; }});
   if(q) nodes.filter(n=>!n.hidden).forEach(n=>n.highlighted=true);
 }}
-
 document.querySelectorAll(".legend-item").forEach(el=>{{
   el.addEventListener("click",()=>{{
     el.classList.toggle("active");
@@ -1582,7 +1454,6 @@ document.querySelectorAll(".legend-item").forEach(el=>{{
     fitView();
   }});
 }});
-
 function savePNG(){{
   const a=document.createElement("a");
   a.href=canvas.toDataURL("image/png");a.download="graph.png";a.click();
@@ -1607,63 +1478,111 @@ function dlCy(){{
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. PIPELINE PRINCIPALE
+# 11. PIPELINE PER SINGOLO FILE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process(input_path: Path, output_path: Path | None = None, verify: bool = False, enrich: bool = True) -> Path:
-    print(f"\n{'═'*60}")
-    print(f"  📂  Documento: {input_path.name}")
-    print(f"  🔌  LLM: {LLM_BASE_URL}  |  Modello: {LLM_MODEL}")
-    print(f"{'═'*60}\n")
+def process_single_file(input_path: Path) -> list[dict]:
+    """
+    Estrae e restituisce la lista di grafi parziali per un singolo file.
+    Non scrive output: il merge finale avviene in process_files().
+    """
+    print(f"\n  📂  {input_path.name}  ({input_path.stat().st_size // 1024} KB)")
+    print(f"  {'─'*50}")
 
-    print("1/5 Estrazione testo…")
     text = extract_text(input_path)
     if not text.strip():
-        print("❌  Nessun testo estratto. Verifica il file.")
-        sys.exit(1)
-    print(f"   ✅  {len(text):,} caratteri estratti")
+        print(f"  ⚠️  Nessun testo estratto da {input_path.name} — saltato")
+        return []
 
-    print("\n2/5 Chunking…")
+    print(f"  ✅  {len(text):,} caratteri estratti")
+
     chunks = split_into_chunks(text, CHUNK_SIZE, CHUNK_OVERLAP)
-    print(f"   ✅  {len(chunks)} chunk(s) da ~{CHUNK_SIZE} chars (overlap: {CHUNK_OVERLAP})")
+    print(f"  ✅  {len(chunks)} chunk(s)")
 
-    print("\n3/5 Estrazione grafo (LLM)…")
     partial_graphs = []
     for i, chunk in enumerate(chunks, 1):
         g = llm_extract_graph(chunk, i, len(chunks))
         partial_graphs.append(g)
 
-    merged = merge_graphs(partial_graphs)
-    merged = prune_graph(merged)
+    return partial_graphs
 
-    print("\n4/5 Arricchimento relazioni…")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. PIPELINE PRINCIPALE  (multi-file)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def process_files(
+    input_paths: list[Path],
+    output_path: Path | None = None,
+    verify: bool = False,
+    enrich: bool = True,
+) -> Path:
+    """
+    Processa uno o più file e genera un unico grafo HTML unificato.
+    I nodi con la stessa label+tipo vengono deduplicati cross-documento.
+    """
+    n_files = len(input_paths)
+    print(f"\n{'═'*60}")
+    print(f"  📦  {n_files} file da processare")
+    print(f"  🔌  LLM: {LLM_BASE_URL}  |  Modello: {LLM_MODEL or '(auto)'}")
+    print(f"{'═'*60}")
+
+    # ── Fase 1: estrazione per file ──────────────────────────────────────────
+    print("\n1/5  Estrazione testo e analisi LLM per ogni file…")
+    all_partial_graphs: list[dict] = []
+    for idx, path in enumerate(input_paths, 1):
+        print(f"\n  [{idx}/{n_files}]", end="")
+        partial = process_single_file(path)
+        all_partial_graphs.extend(partial)
+
+    # ── Fase 2: merge globale ────────────────────────────────────────────────
+    print(f"\n\n2/5  Merge di {len(all_partial_graphs)} grafi parziali…")
+    merged = merge_graphs(all_partial_graphs)
+    merged = prune_graph(merged)
+    print(f"   ✅  Dopo merge: {len(merged['nodes'])} nodi, {len(merged['edges'])} archi")
+
+    # ── Fase 3: arricchimento ────────────────────────────────────────────────
+    print("\n3/5  Arricchimento relazioni…")
     if enrich:
         merged = enrich_relations(merged)
     else:
-        print("   ⏭️  Saltato (usa --no-enrich per disattivare)")
+        print("   ⏭️  Saltato (--no-enrich attivo)")
 
+    # ── Fase 4: verifica opzionale ───────────────────────────────────────────
     if verify:
-        print("\n   🔍  Verifica relazioni via LLM…")
+        print("\n4/5  Verifica relazioni via LLM…")
         merged = llm_verify_relations(merged)
+    else:
+        print("\n4/5  Verifica LLM saltata (usa --verify per attivarla)")
 
-    n_nodes = len(merged["nodes"])
-    n_edges = len(merged["edges"])
-    print(f"\n   🔗  Grafo finale: {n_nodes} nodi, {n_edges} archi")
+    # ── Fase 5: output ───────────────────────────────────────────────────────
+    print("\n5/5  Generazione HTML…")
 
-    if n_nodes == 0:
-        print("⚠️  Nessun nodo estratto. Controlla il modello e il testo.")
+    # Nome da usare nell'header HTML
+    if n_files == 1:
+        doc_name = input_paths[0].name
+        default_stem = input_paths[0].stem + "_graph"
+        default_dir  = input_paths[0].parent
+    else:
+        names = ", ".join(p.name for p in input_paths[:3])
+        if n_files > 3:
+            names += f" +{n_files - 3} altri"
+        doc_name = names
+        # Output nella directory del primo file
+        default_stem = "merged_graph"
+        default_dir  = input_paths[0].parent
 
-    print("\n5/5 Generazione HTML…")
     if output_path is None:
-        output_path = input_path.with_name(input_path.stem + "_graph.html")
+        output_path = default_dir / (default_stem + ".html")
 
-    build_html(merged, input_path.name, output_path)
+    build_html(merged, doc_name, output_path)
 
     json_out = output_path.with_suffix(".json")
     json_out.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"   📊  JSON salvato → {json_out}")
 
-    print(f"\n🎉  Completato! Apri nel browser:\n    {output_path.resolve()}\n")
+    print(f"\n🎉  Completato!  {len(merged['nodes'])} nodi · {len(merged['edges'])} archi")
+    print(f"    Apri nel browser:\n    {output_path.resolve()}\n")
     return output_path
 
 
@@ -1673,27 +1592,78 @@ def process(input_path: Path, output_path: Path | None = None, verify: bool = Fa
 
 def main():
     global CHUNK_SIZE, CHUNK_OVERLAP
+
     parser = argparse.ArgumentParser(
-        description="Estrae un grafo di conoscenza da un documento e genera un visualizzatore HTML."
+        description=(
+            "Estrae un grafo di conoscenza da uno o più documenti "
+            "e genera un visualizzatore HTML interattivo stile Neo4j.\n\n"
+            "Esempi:\n"
+            "  python doc2graph.py relazione.pdf\n"
+            "  python doc2graph.py file1.txt file2.docx file3.pdf\n"
+            "  python doc2graph.py docs/*.pdf -o output/grafo.html"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("input", help="Percorso del documento (txt, md, pdf, docx, csv, json, epub…)")
-    parser.add_argument("-o", "--output",       help="File HTML di output (default: <input>_graph.html)")
-    parser.add_argument("--chunk-size",  type=int, default=CHUNK_SIZE,    help=f"Dimensione chunk in caratteri (default: {CHUNK_SIZE})")
-    parser.add_argument("--overlap",     type=int, default=CHUNK_OVERLAP, help=f"Overlap tra chunk in caratteri (default: {CHUNK_OVERLAP})")
-    parser.add_argument("--verify",      action="store_true",             help="Attiva verifica LLM delle relazioni estratte (costa token)")
-    parser.add_argument("--no-enrich",   action="store_true",             help="Disattiva l'arricchimento automatico delle relazioni generiche")
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        help="Uno o più file (txt, md, pdf, docx, csv, json, epub…). "
+             "Supporta glob shell: 'docs/*.pdf'",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="File HTML di output "
+             "(default: <primo_file>_graph.html per 1 file, merged_graph.html per più file)",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int, default=CHUNK_SIZE,
+        help=f"Dimensione chunk in caratteri (default: {CHUNK_SIZE})",
+    )
+    parser.add_argument(
+        "--overlap",
+        type=int, default=CHUNK_OVERLAP,
+        help=f"Overlap tra chunk in caratteri (default: {CHUNK_OVERLAP})",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Attiva verifica LLM delle relazioni estratte (costa token)",
+    )
+    parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        help="Disattiva l'arricchimento automatico delle relazioni generiche",
+    )
     args = parser.parse_args()
+
     CHUNK_SIZE    = args.chunk_size
     CHUNK_OVERLAP = args.overlap
 
-    input_path  = Path(args.input)
-    output_path = Path(args.output) if args.output else None
+    # Risolvi i path e verifica che esistano
+    input_paths: list[Path] = []
+    for raw in args.inputs:
+        p = Path(raw)
+        if not p.exists():
+            print(f"❌  File non trovato: {p}")
+            sys.exit(1)
+        if not p.is_file():
+            print(f"❌  Non è un file: {p}")
+            sys.exit(1)
+        input_paths.append(p)
 
-    if not input_path.exists():
-        print(f"❌  File non trovato: {input_path}")
+    if not input_paths:
+        print("❌  Nessun file valido specificato.")
         sys.exit(1)
 
-    process(input_path, output_path, verify=args.verify, enrich=not args.no_enrich)
+    output_path = Path(args.output) if args.output else None
+
+    process_files(
+        input_paths,
+        output_path,
+        verify=args.verify,
+        enrich=not args.no_enrich,
+    )
 
 
 if __name__ == "__main__":
