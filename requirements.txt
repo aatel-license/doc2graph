@@ -1,0 +1,16 @@
+# doc2graph — Dipendenze Python
+# pip install -r requirements.txt
+
+# Core
+openai>=1.0.0          # client OpenAI-compatible (LM-Studio, Ollama, OpenAI…)
+python-dotenv>=1.0.0   # lettura .env
+
+# Lettura documenti
+pypdf>=4.0.0           # estrazione testo PDF
+python-docx>=1.0.0     # lettura/scrittura DOCX
+markdown2>=2.4.0       # parsing Markdown (opzionale)
+
+# pandoc è richiesto come tool di sistema per: epub, odt, rtf, doc, pptx
+# Installa con: sudo apt install pandoc  oppure  brew install pandoc
+# pdftotext (da poppler) consigliato per PDF scansionati:
+# sudo apt install poppler-utils  oppure  brew install poppler
