@@ -7,12 +7,15 @@ Formati supportati: .txt .md .pdf .docx .doc .epub .odt .rtf .csv .json
 Utilizza un LLM OpenAI-compatible (LM-Studio, Ollama, OpenAI…) via .env
 
 MULTI-FILE: passa più file o glob come argomenti → unico grafo unificato.
+CHECKPOINT: salva il progresso dopo ogni file, riprende se interrotto.
+MERGE MODE: --merge-jsons a.json b.json -o finale.html  (zero LLM)
 """
 
 import os
 import sys
 import json
 import re
+import gc
 import argparse
 import subprocess
 import tempfile
@@ -51,11 +54,6 @@ client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 
 def _resolve_model() -> str:
-    """
-    Risolve il nome del modello da usare:
-    1. Se LLM_MODEL è impostato nel .env → usalo direttamente
-    2. Altrimenti interroga /v1/models e prende il primo disponibile
-    """
     global LLM_MODEL
     if LLM_MODEL:
         return LLM_MODEL
@@ -216,10 +214,6 @@ def _pandoc_to_text(path: Path) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def split_into_chunks(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """
-    Divide il testo in chunk con overlap per preservare il contesto
-    ai confini tra chunk adiacenti ed evitare relazioni spezzate.
-    """
     chunks = []
     start = 0
     while start < len(text):
@@ -238,7 +232,7 @@ def split_into_chunks(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. PROMPT DI ESTRAZIONE (vincolato con evidence)
+# 4. PROMPT DI ESTRAZIONE
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Sei un esperto di knowledge graph e Neo4j.
@@ -307,7 +301,6 @@ REGOLE CRITICHE SULLE RELAZIONI:
 6. NON aggiungere IS_A, PART_OF, INSTANCE_OF se non scritti nel testo.
 """
 
-# Usato nella fase di arricchimento post-merge
 ENRICH_PROMPT = """Sei un esperto di knowledge graph.
 Ricevi un JSON con nodes e edges estratti da un documento.
 
@@ -491,12 +484,6 @@ def safe_parse_llm_json(raw: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
-    """
-    Wrapper di chiamata LLM con:
-    - auto-discovery modello se LLM_MODEL è vuoto
-    - retry su risposta vuota (il modello non ha generato nulla)
-    - backoff esponenziale su errori di rete
-    """
     import time
     model = _resolve_model()
 
@@ -510,7 +497,6 @@ def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
             )
             raw = response.choices[0].message.content
 
-            # ── Risposta vuota o None ─────────────────────────────────────
             if not raw or not raw.strip():
                 finish = response.choices[0].finish_reason or "?"
                 print(f"\n   ⚠️  Risposta vuota (tentativo {attempt}/{LLM_RETRY}) finish_reason={finish}")
@@ -518,11 +504,7 @@ def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
                     print(f"      → max_tokens ({max_tokens}) troppo basso. "
                           f"Aumenta LLM_MAX_TOKENS nel .env")
                 elif finish in ("stop", None, "?"):
-                    print(f"      → Il modello non ha generato output. "
-                          f"Possibili cause:")
-                    print(f"         • Testo troppo lungo per la context window del modello")
-                    print(f"         • Modello non istruito per output JSON (prova un modello instruct)")
-                    print(f"         • LM-Studio non ha il modello caricato correttamente")
+                    print(f"      → Il modello non ha generato output.")
                 if attempt < LLM_RETRY:
                     wait = 2 ** attempt
                     print(f"      → Ritento tra {wait}s...", flush=True)
@@ -535,30 +517,24 @@ def _call_llm(messages: list, max_tokens: int, temperature: float = 0.1) -> str:
             err_str = str(e)
             print(f"\n   ❌  Errore LLM (tentativo {attempt}/{LLM_RETRY}): {err_str}")
 
-            # Diagnosi specifica degli errori comuni
             if "Connection refused" in err_str or "connect" in err_str.lower():
                 print(f"      → Server non raggiungibile su {LLM_BASE_URL}")
-                print(f"         Avvia LM-Studio e premi 'Start Server'")
             elif "model" in err_str.lower() and "not found" in err_str.lower():
                 print(f"      → Modello '{model}' non trovato.")
-                print(f"         Modelli disponibili:")
                 try:
                     avail = [m.id for m in client.models.list().data]
                     for mid in avail:
                         print(f"           • {mid}")
-                    print(f"         Imposta LLM_MODEL=<nome> nel .env")
                 except Exception:
                     pass
             elif "context" in err_str.lower() or "too long" in err_str.lower():
-                print(f"      → Testo troppo lungo per la context window.")
-                print(f"         Riduci CHUNK_SIZE nel .env (attuale: {CHUNK_SIZE})")
+                print(f"      → Testo troppo lungo. Riduci CHUNK_SIZE nel .env")
 
             if attempt < LLM_RETRY:
                 wait = 2 ** attempt
                 print(f"      → Ritento tra {wait}s…", flush=True)
                 time.sleep(wait)
 
-    # Tutti i tentativi falliti
     return ""
 
 
@@ -593,14 +569,10 @@ def llm_extract_graph(text_chunk: str, chunk_idx: int, total: int) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. NORMALIZZAZIONE LABEL (per deduplicazione robusta)
+# 7. NORMALIZZAZIONE LABEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def normalize_label(label: str) -> str:
-    """
-    Normalizza la label per deduplicare varianti dello stesso nodo:
-    case, accenti, punteggiatura, spazi multipli.
-    """
     s = label.strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = re.sub(r"[^\w\s]", "", s)
@@ -613,11 +585,6 @@ def normalize_label(label: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def merge_graphs(graph_list: list[dict]) -> dict:
-    """
-    Unisce più grafi parziali disambiguando gli id dei nodi.
-    Usa normalize_label per evitare duplicati da varianti ortografiche.
-    Funziona sia per chunk dello stesso documento sia per documenti diversi.
-    """
     all_nodes: dict[str, dict] = {}
     all_edges: list[dict] = []
     counter = 0
@@ -668,11 +635,6 @@ def merge_graphs(graph_list: list[dict]) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prune_graph(graph: dict) -> dict:
-    """
-    - Rimuove archi con source/target inesistenti
-    - Rimuove self-loop
-    - Deduplicazione archi (stesso source+target+type)
-    """
     valid_ids = {n["id"] for n in graph["nodes"]}
 
     clean_edges = [
@@ -699,10 +661,6 @@ def prune_graph(graph: dict) -> dict:
 
 
 def llm_verify_relations(graph: dict, sample_size: int = 20) -> dict:
-    """
-    Chiede al LLM di validare un campione di relazioni e rimuove quelle dubbie.
-    Opzionale: attiva con --verify nella CLI o chiamando direttamente la funzione.
-    """
     if not graph["edges"]:
         return graph
 
@@ -744,7 +702,6 @@ Relazioni:
     return graph
 
 
-# Tipi di relazione generici da intercettare e migliorare
 GENERIC_TYPES = {
     "RELAZIONATO_A", "CONNESSO_A", "ASSOCIATO_A", "COLLEGATO_A", "MENZIONA",
     "HA_RELAZIONE", "E_CONNESSO", "APPARTIENE", "RIFERITO_A", "LEGATO_A",
@@ -753,13 +710,8 @@ GENERIC_TYPES = {
 
 
 def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
-    """
-    Passa al LLM gli edge con tipo generico o label mancante per arricchirli.
-    Lavora in batch per non sforare il context window.
-    """
     node_map = {n["id"]: n["label"] for n in graph["nodes"]}
 
-    # Individua gli edge da migliorare
     to_enrich_idx = [
         i for i, e in enumerate(graph["edges"])
         if e.get("type", "").upper() in GENERIC_TYPES
@@ -799,7 +751,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
             if not result:
                 continue
 
-            # Il modello può rispondere con {"edges":[...]} o direttamente [...]
             improved = result.get("edges", result) if isinstance(result, dict) else result
             if not isinstance(improved, list):
                 continue
@@ -807,7 +758,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
             for item in improved:
                 orig_idx = item.get("_idx")
                 if orig_idx is None:
-                    # fallback: abbina per posizione nel batch
                     pos = improved.index(item)
                     if pos < len(batch_idx):
                         orig_idx = batch_idx[pos]
@@ -819,7 +769,6 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
                 new_label = item.get("label", e.get("label", "")).strip()
                 new_props = item.get("properties", e.get("properties", {}))
 
-                # Applica solo se il tipo è effettivamente migliorato
                 if new_type and new_type not in GENERIC_TYPES:
                     e["type"] = new_type
                     enriched += 1
@@ -834,6 +783,42 @@ def enrich_relations(graph: dict, batch_size: int = 30) -> dict:
     print(f"   ✅  Arricchimento completato: {enriched} relazioni migliorate")
     return graph
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. CHECKPOINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _checkpoint_path(input_path: Path) -> Path:
+    return input_path.parent / (input_path.stem + ".checkpoint.json")
+
+
+def _load_checkpoint(input_path: Path) -> list[dict] | None:
+    cp = _checkpoint_path(input_path)
+    if cp.exists():
+        try:
+            data = json.loads(cp.read_text(encoding="utf-8"))
+            print(f"   ♻️  Checkpoint trovato → {cp.name} ({len(data)} grafi parziali, skip LLM)")
+            return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_checkpoint(input_path: Path, partial_graphs: list[dict]) -> None:
+    cp = _checkpoint_path(input_path)
+    cp.write_text(json.dumps(partial_graphs, ensure_ascii=False), encoding="utf-8")
+    print(f"   💾  Checkpoint salvato → {cp.name}")
+
+
+def _clear_checkpoint(input_path: Path) -> None:
+    cp = _checkpoint_path(input_path)
+    if cp.exists():
+        cp.unlink()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. GENERAZIONE HTML
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. GENERAZIONE HTML
@@ -1632,18 +1617,21 @@ function dlCy(){{
     output_path.write_text(html, encoding="utf-8")
     print(f"\n✅  HTML salvato → {output_path}")
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. PIPELINE PRINCIPALE
+# 12. PIPELINE PRINCIPALE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def process_single_file(input_path: Path) -> list[dict]:
     """
     Estrae e restituisce la lista di grafi parziali per un singolo file.
-    Non scrive output: il merge finale avviene in process_files().
+    Checkpoint granulare: salva dopo OGNI chunk, riprende dal chunk mancante.
     """
     print(f"\n  📂  {input_path.name}  ({input_path.stat().st_size // 1024} KB)")
     print(f"  {'─'*50}")
+
+    # ── Checkpoint: carica grafi già estratti per questo file ────────────────
+    cached = _load_checkpoint(input_path)  # lista di grafi parziali già fatti
+    already_done = len(cached) if cached else 0
 
     text = extract_text(input_path)
     if not text.strip():
@@ -1653,18 +1641,28 @@ def process_single_file(input_path: Path) -> list[dict]:
     print(f"  ✅  {len(text):,} caratteri estratti")
 
     chunks = split_into_chunks(text, CHUNK_SIZE, CHUNK_OVERLAP)
-    print(f"  ✅  {len(chunks)} chunk(s)")
+    print(f"  ✅  {len(chunks)} chunk(s)  (già fatti: {already_done})")
 
-    partial_graphs = []
+    del text
+    gc.collect()
+
+    partial_graphs: list[dict] = cached if cached else []
+
     for i, chunk in enumerate(chunks, 1):
+        if i <= already_done:
+            continue  # chunk già in checkpoint, salta
         g = llm_extract_graph(chunk, i, len(chunks))
         partial_graphs.append(g)
+        _save_checkpoint(input_path, partial_graphs)  # salva dopo ogni chunk
+        print(f"   💾  Chunk {i}/{len(chunks)} salvato ({len(partial_graphs[-1].get('nodes',[]))} nodi, {len(partial_graphs[-1].get('edges',[]))} archi)")
+        del chunk
+        gc.collect()
 
     return partial_graphs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12. PIPELINE PRINCIPALE  (multi-file)
+# 13. PIPELINE MULTI-FILE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def process_files(
@@ -1675,7 +1673,9 @@ def process_files(
 ) -> Path:
     """
     Processa uno o più file e genera un unico grafo HTML unificato.
-    I nodi con la stessa label+tipo vengono deduplicati cross-documento.
+    - Checkpoint per file: riprende se interrotto
+    - Merge incrementale: bassa RAM (non accumula tutti i parziali)
+    - gc.collect() tra un file e l'altro
     """
     n_files = len(input_paths)
     print(f"\n{'═'*60}")
@@ -1683,62 +1683,104 @@ def process_files(
     print(f"  🔌  LLM: {LLM_BASE_URL}  |  Modello: {LLM_MODEL or '(auto)'}")
     print(f"{'═'*60}")
 
-    # ── Fase 1: estrazione per file ──────────────────────────────────────────
     print("\n1/5  Estrazione testo e analisi LLM per ogni file…")
-    all_partial_graphs: list[dict] = []
+
+    # ── Merge incrementale: processa un file alla volta ──────────────────────
+    accumulated: dict = {"nodes": [], "edges": []}
+
     for idx, path in enumerate(input_paths, 1):
         print(f"\n  [{idx}/{n_files}]", end="")
         partial = process_single_file(path)
-        all_partial_graphs.extend(partial)
 
-    # ── Fase 2: merge globale ────────────────────────────────────────────────
-    print(f"\n\n2/5  Merge di {len(all_partial_graphs)} grafi parziali…")
-    merged = merge_graphs(all_partial_graphs)
-    merged = prune_graph(merged)
-    print(f"   ✅  Dopo merge: {len(merged['nodes'])} nodi, {len(merged['edges'])} archi")
+        if partial:
+            accumulated = merge_graphs([accumulated] + partial)
+            accumulated = prune_graph(accumulated)
+            print(f"   📊  Totale finora: {len(accumulated['nodes'])} nodi, "
+                  f"{len(accumulated['edges'])} archi")
 
-    # ── Fase 3: arricchimento ────────────────────────────────────────────────
+        del partial
+        gc.collect()
+
+    print(f"\n\n2/5  Merge completato: "
+          f"{len(accumulated['nodes'])} nodi, {len(accumulated['edges'])} archi")
+
+    # ── Arricchimento ────────────────────────────────────────────────────────
     print("\n3/5  Arricchimento relazioni…")
     if enrich:
-        merged = enrich_relations(merged)
+        accumulated = enrich_relations(accumulated)
     else:
         print("   ⏭️  Saltato (--no-enrich attivo)")
 
-    # ── Fase 4: verifica opzionale ───────────────────────────────────────────
+    # ── Verifica opzionale ───────────────────────────────────────────────────
     if verify:
         print("\n4/5  Verifica relazioni via LLM…")
-        merged = llm_verify_relations(merged)
+        accumulated = llm_verify_relations(accumulated)
     else:
         print("\n4/5  Verifica LLM saltata (usa --verify per attivarla)")
 
-    # ── Fase 5: output ───────────────────────────────────────────────────────
+    # ── Output ───────────────────────────────────────────────────────────────
     print("\n5/5  Generazione HTML…")
 
-    # Nome da usare nell'header HTML
     if n_files == 1:
-        doc_name = input_paths[0].name
+        doc_name     = input_paths[0].name
         default_stem = input_paths[0].stem + "_graph"
         default_dir  = input_paths[0].parent
     else:
         names = ", ".join(p.name for p in input_paths[:3])
         if n_files > 3:
             names += f" +{n_files - 3} altri"
-        doc_name = names
-        # Output nella directory del primo file
+        doc_name     = names
         default_stem = "merged_graph"
         default_dir  = input_paths[0].parent
 
     if output_path is None:
         output_path = default_dir / (default_stem + ".html")
 
-    build_html(merged, doc_name, output_path)
+    build_html(accumulated, doc_name, output_path)
 
     json_out = output_path.with_suffix(".json")
-    json_out.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_out.write_text(json.dumps(accumulated, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"   📊  JSON salvato → {json_out}")
 
-    print(f"\n🎉  Completato!  {len(merged['nodes'])} nodi · {len(merged['edges'])} archi")
+    print(f"\n🎉  Completato!  {len(accumulated['nodes'])} nodi · {len(accumulated['edges'])} archi")
     print(f"    Apri nel browser:\n    {output_path.resolve()}\n")
+
+    # Checkpoint puliti solo a successo completo
+    for p in input_paths:
+        _clear_checkpoint(p)
+
+    return output_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. MODALITÀ --merge-jsons  (zero LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def merge_jsons(json_paths: list[Path], output_path: Path) -> Path:
+    """
+    Carica N file .json già estratti e li unisce in un HTML.
+    Non chiama il LLM: utile per combinare batch precedenti.
+    """
+    print(f"\n🔀  Merge di {len(json_paths)} JSON (zero LLM)…")
+    graphs = []
+    for jp in json_paths:
+        data = json.loads(jp.read_text(encoding="utf-8"))
+        graphs.append(data)
+        print(f"   ✅  {jp.name}: {len(data['nodes'])} nodi, {len(data['edges'])} archi")
+
+    merged = merge_graphs(graphs)
+    merged = prune_graph(merged)
+    print(f"\n   📊  Dopo merge: {len(merged['nodes'])} nodi, {len(merged['edges'])} archi")
+
+    doc_name = " + ".join(p.stem for p in json_paths[:3])
+    if len(json_paths) > 3:
+        doc_name += f" +{len(json_paths)-3}"
+
+    build_html(merged, doc_name, output_path)
+    json_out = output_path.with_suffix(".json")
+    json_out.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n✅  HTML → {output_path}")
+    print(f"✅  JSON → {json_out}")
     return output_path
 
 
@@ -1756,20 +1798,20 @@ def main():
             "Esempi:\n"
             "  python doc2graph.py relazione.pdf\n"
             "  python doc2graph.py file1.txt file2.docx file3.pdf\n"
-            "  python doc2graph.py docs/*.pdf -o output/grafo.html"
+            "  python doc2graph.py docs/*.pdf -o output/grafo.html\n"
+            "  python doc2graph.py --merge-jsons batch1.json batch2.json -o finale.html"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "inputs",
-        nargs="+",
+        nargs="*",
         help="Uno o più file (txt, md, pdf, docx, csv, json, epub…). "
-             "Supporta glob shell: 'docs/*.pdf'",
+             "Non richiesto in modalità --merge-jsons.",
     )
     parser.add_argument(
         "-o", "--output",
-        help="File HTML di output "
-             "(default: <primo_file>_graph.html per 1 file, merged_graph.html per più file)",
+        help="File HTML di output",
     )
     parser.add_argument(
         "--chunk-size",
@@ -1791,12 +1833,41 @@ def main():
         action="store_true",
         help="Disattiva l'arricchimento automatico delle relazioni generiche",
     )
+    parser.add_argument(
+        "--merge-jsons",
+        nargs="+",
+        metavar="JSON",
+        help="Modalità merge: unisce N file .json già estratti in un unico HTML (zero LLM). "
+             "Esempio: --merge-jsons batch1.json batch2.json -o finale.html",
+    )
+    parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disattiva il checkpointing per file (default: attivo)",
+    )
     args = parser.parse_args()
 
     CHUNK_SIZE    = args.chunk_size
     CHUNK_OVERLAP = args.overlap
 
-    # Risolvi i path e verifica che esistano
+    # ── Modalità merge-jsons ─────────────────────────────────────────────────
+    if args.merge_jsons:
+        json_paths = []
+        for raw in args.merge_jsons:
+            p = Path(raw)
+            if not p.exists():
+                print(f"❌  File non trovato: {p}")
+                sys.exit(1)
+            json_paths.append(p)
+        out = Path(args.output) if args.output else Path("merged_graph.html")
+        merge_jsons(json_paths, out)
+        return
+
+    # ── Modalità normale ─────────────────────────────────────────────────────
+    if not args.inputs:
+        parser.print_help()
+        sys.exit(1)
+
     input_paths: list[Path] = []
     for raw in args.inputs:
         p = Path(raw)
@@ -1811,6 +1882,11 @@ def main():
     if not input_paths:
         print("❌  Nessun file valido specificato.")
         sys.exit(1)
+
+    # Se --no-checkpoint, cancella eventuali checkpoint esistenti
+    if args.no_checkpoint:
+        for p in input_paths:
+            _clear_checkpoint(p)
 
     output_path = Path(args.output) if args.output else None
 
