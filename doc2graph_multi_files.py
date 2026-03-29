@@ -980,6 +980,25 @@ canvas.dragging{{cursor:grabbing}}
 .mo{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;
      align-items:center;justify-content:center}}
 .mo.show{{display:flex}}
+#ctx-menu{{
+  position:fixed;display:none;z-index:200;
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:8px;padding:5px 0;min-width:190px;
+  box-shadow:0 8px 28px rgba(0,0,0,.6);font-size:13px;
+}}
+#ctx-menu .ctx-title{{
+  padding:5px 14px 3px;font-size:10px;
+  text-transform:uppercase;letter-spacing:1px;color:var(--dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px;
+}}
+#ctx-menu .ctx-sep{{height:1px;background:var(--border);margin:4px 0}}
+#ctx-menu .ctx-item{{
+  display:flex;align-items:center;gap:9px;padding:7px 14px;
+  cursor:pointer;color:var(--text);transition:.12s;user-select:none;
+}}
+#ctx-menu .ctx-item:hover{{background:var(--panel2);color:#fff}}
+#ctx-menu .ctx-item.danger{{color:#ff8080}}
+#ctx-menu .ctx-item.danger:hover{{background:#5a1010}}
 .md{{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
      width:640px;max-width:94vw;max-height:78vh;display:flex;flex-direction:column}}
 .mh{{display:flex;justify-content:space-between;align-items:center;
@@ -1082,6 +1101,20 @@ footer{{font-size:10px;color:var(--dim);text-align:center;padding:4px;
 </div>
 
 <footer>doc2graph · LLM Knowledge Graph Extractor · {timestamp}</footer>
+
+<div id="ctx-menu">
+  <div class="ctx-title" id="ctx-node-name">Nodo</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="ctxFilterNode()">&#128269; Solo questo nodo</div>
+  <div class="ctx-item" onclick="ctxExpand(1)">&#127758; Espandi 1&#176; livello</div>
+  <div class="ctx-item" onclick="ctxExpand(2)">&#127758; Espandi 2&#176; livello</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="ctxPinToggle()">&#128204; <span id="ctx-pin-lbl">Fissa posizione</span></div>
+  <div class="ctx-item" onclick="ctxCopyLabel()">&#128203; Copia etichetta</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="showAll();closeCtx()">&#9851; Reset filtro</div>
+  <div class="ctx-item danger" onclick="ctxHideNode()">&#128584; Nascondi nodo</div>
+</div>
 
 <div class="mo" id="cm">
   <div class="md">
@@ -1609,6 +1642,88 @@ function dlCy(){{
   const a=document.createElement("a");
   a.href="data:text/plain;charset=utf-8,"+encodeURIComponent(CYPHER);
   a.download="graph.cypher";a.click();
+}}
+
+// ── Context menu ────────────────────────────────────────────────────────────
+let ctxNode=null;
+
+function closeCtx(){{
+  document.getElementById("ctx-menu").style.display="none";
+  ctxNode=null;
+}}
+
+canvas.addEventListener("contextmenu",function(e){{
+  e.preventDefault();
+  var r=canvas.getBoundingClientRect();
+  var n=nodeAt(e.clientX-r.left, e.clientY-r.top);
+  if(!n){{ closeCtx(); return; }}
+  ctxNode=n;
+  selectedNode=n;
+  showInfo(n);
+  document.getElementById("ctx-node-name").textContent=n.label+" ["+n.type+"]";
+  document.getElementById("ctx-pin-lbl").textContent=n.pinned?"Sblocca posizione":"Fissa posizione";
+  var menu=document.getElementById("ctx-menu");
+  menu.style.display="block";
+  var mw=menu.offsetWidth, mh=menu.offsetHeight;
+  var vw=window.innerWidth,  vh=window.innerHeight;
+  menu.style.left=(e.clientX+mw>vw ? e.clientX-mw : e.clientX+4)+"px";
+  menu.style.top =(e.clientY+mh>vh ? e.clientY-mh : e.clientY+4)+"px";
+}});
+
+document.addEventListener("click", closeCtx);
+document.addEventListener("keydown",function(e){{ if(e.key==="Escape") closeCtx(); }});
+
+function getNeighborIds(startNode, depth){{
+  var visited=new Set([startNode.id]);
+  var frontier=[startNode.id];
+  for(var d=0;d<depth;d++){{
+    var next=[];
+    edges.forEach(function(e){{
+      if(frontier.indexOf(e.source.id)!==-1 && !visited.has(e.target.id)){{
+        visited.add(e.target.id); next.push(e.target.id);
+      }}
+      if(frontier.indexOf(e.target.id)!==-1 && !visited.has(e.source.id)){{
+        visited.add(e.source.id); next.push(e.source.id);
+      }}
+    }});
+    frontier=next;
+    if(!frontier.length) break;
+  }}
+  return visited;
+}}
+
+function ctxFilterNode(){{
+  if(!ctxNode) return;
+  var keep=getNeighborIds(ctxNode,1);
+  nodes.forEach(function(n){{ n.hidden=!keep.has(n.id); }});
+  fitView(); closeCtx();
+}}
+
+function ctxExpand(depth){{
+  if(!ctxNode) return;
+  var keep=getNeighborIds(ctxNode,depth);
+  nodes.forEach(function(n){{ n.hidden=!keep.has(n.id); }});
+  fitView(); closeCtx();
+}}
+
+function ctxPinToggle(){{
+  if(!ctxNode) return;
+  ctxNode.pinned=!ctxNode.pinned;
+  if(!ctxNode.pinned){{ ctxNode.vx=0; ctxNode.vy=0; }}
+  closeCtx();
+}}
+
+function ctxCopyLabel(){{
+  if(!ctxNode) return;
+  if(navigator.clipboard) navigator.clipboard.writeText(ctxNode.label);
+  closeCtx();
+}}
+
+function ctxHideNode(){{
+  if(!ctxNode) return;
+  ctxNode.hidden=true;
+  if(selectedNode===ctxNode) closeInfo();
+  closeCtx();
 }}
 </script>
 </body>
