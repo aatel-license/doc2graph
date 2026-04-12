@@ -5,7 +5,7 @@ __pycache__/
 *.html
 # C extensions
 *.so
-
+doc2graph/__pycache__/
 # Distribution / packaging
 .Python
 build/
