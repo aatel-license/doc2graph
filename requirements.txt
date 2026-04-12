@@ -1,16 +1,33 @@
-# doc2graph — Dipendenze Python
-# pip install -r requirements.txt
+# ── Core (obbligatori) ───────────────────────────────────────────────────────
+openai>=1.0.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 
-# Core
-openai>=1.0.0          # client OpenAI-compatible (LM-Studio, Ollama, OpenAI…)
-python-dotenv>=1.0.0   # lettura .env
+# ── PDF ──────────────────────────────────────────────────────────────────────
+pypdf>=4.0.0
 
-# Lettura documenti
-pypdf>=4.0.0           # estrazione testo PDF
-python-docx>=1.0.0     # lettura/scrittura DOCX
-markdown2>=2.4.0       # parsing Markdown (opzionale)
+# ── DOCX ─────────────────────────────────────────────────────────────────────
+python-docx>=1.0.0
 
-# pandoc è richiesto come tool di sistema per: epub, odt, rtf, doc, pptx
-# Installa con: sudo apt install pandoc  oppure  brew install pandoc
-# pdftotext (da poppler) consigliato per PDF scansionati:
-# sudo apt install poppler-utils  oppure  brew install poppler
+# ── Opzionali (migliorie) ─────────────────────────────────────────────────────
+
+# Fuzzy deduplication nodi (consigliato)
+# rapidfuzz>=3.0.0
+
+# Chunking preciso per token (consigliato)
+# tiktoken>=0.6.0
+
+# Progress bar colorata in terminale (consigliato)
+# rich>=13.0.0
+
+# Template HTML esterno (alternativa al template inline)
+# jinja2>=3.0.0
+
+# Export RDF (già incluso nella stdlib, nessuna dipendenza extra)
+
+# ── Dev / test ────────────────────────────────────────────────────────────────
+# pytest>=8.0.0
+# pytest-cov
+# black
+# ruff

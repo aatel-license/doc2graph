@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graph — {{ doc_name }}</title>
+<!--
+  doc2graph v2.0 — Template Jinja2
+  Modifica questo file per personalizzare il visualizzatore.
+  Variabili disponibili:
+    doc_name      : nome del documento sorgente
+    nodes_json    : array JSON dei nodi
+    edges_json    : array JSON degli archi
+    legend_items  : HTML della legenda tipi
+    stats         : stringa statistiche (nodi · archi · tipi)
+    timestamp     : data/ora generazione
+-->
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#1A1A2E;--panel:#16213E;--panel2:#0F3460;
+  --accent:#E94560;--accent2:#F5A623;
+  --text:#E0E0E0;--dim:#888;--border:#2A2A5A;
+  --r:10px;--font:'Inter','Segoe UI',sans-serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);
+  height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:9px 18px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
+.logo{font-size:17px;font-weight:700;color:#00C9A7}
+.dtitle{font-size:12px;color:var(--dim);border-left:1px solid var(--border);
+  padding-left:10px;max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{font-size:11px;color:var(--dim);background:var(--panel2);padding:3px 10px;border-radius:20px}
+.btn{cursor:pointer;padding:5px 13px;border:none;border-radius:6px;font-size:12px;font-weight:600;transition:.15s}
+.btn-a{background:var(--accent);color:#fff}.btn-a:hover{background:#ff6a80}
+.btn-o{background:transparent;border:1px solid var(--border);color:var(--text)}.btn-o:hover{background:var(--panel2)}
+.main{display:flex;flex:1;overflow:hidden}
+.sb{width:260px;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
+.ss{padding:12px 14px;border-bottom:1px solid var(--border)}
+.ss h3{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:8px}
+.search{width:100%;padding:6px 9px;background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);font-size:12px;outline:none}
+.cg{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px}
+.cb{padding:6px;font-size:11px;text-align:center;cursor:pointer;background:var(--bg);
+  border:1px solid var(--border);border-radius:5px;color:var(--text);transition:.12s}
+.cb:hover,.cb.active{background:var(--accent2);color:#111;border-color:var(--accent2)}
+.slider-row{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.slider-row label{font-size:11px;color:var(--dim);min-width:78px;flex-shrink:0}
+.slider-row span{font-size:11px;color:var(--accent2);min-width:28px;text-align:right;flex-shrink:0}
+.sli{flex:1;-webkit-appearance:none;height:4px;border-radius:2px;background:var(--border);outline:none;cursor:pointer}
+.sli::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent2);cursor:pointer}
+.ls{overflow-y:auto;flex:1;padding:12px 14px}
+.legend-item{display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:5px;
+  cursor:pointer;padding:3px 5px;border-radius:4px;transition:.12s}
+.legend-item:hover,.legend-item.active{background:var(--panel2)}
+.legend-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0}
+.ts{padding:8px 14px;border-top:1px solid var(--border);font-size:10px;color:var(--dim)}
+#wrap{flex:1;position:relative;overflow:hidden}
+canvas{display:block;width:100%;height:100%;cursor:grab}
+canvas.dragging{cursor:grabbing}
+#tip{position:absolute;pointer-events:none;display:none;
+  background:var(--panel);border:1px solid var(--border);border-radius:7px;
+  padding:10px 12px;font-size:12px;max-width:280px;z-index:20;line-height:1.5}
+#tip strong{color:var(--accent2)}
+#tip .ev{margin-top:5px;padding-top:5px;border-top:1px solid var(--border);
+  font-size:11px;color:#aaa;font-style:italic}
+#info{position:absolute;right:14px;bottom:14px;width:270px;
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
+  padding:13px;display:none;z-index:15;max-height:320px;overflow-y:auto}
+#info h4{font-size:14px;font-weight:700;color:var(--accent2);margin-bottom:3px}
+#info .it{font-size:11px;color:var(--dim);margin-bottom:8px}
+#info .ir{font-size:12px;border-bottom:1px solid var(--border);padding:4px 0;display:flex;gap:8px}
+#info .ik{color:var(--dim);min-width:75px}
+.xi{float:right;cursor:pointer;color:var(--dim);font-size:16px}
+</style>
+</head>
+<body>
+<header>
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="logo">◈ doc2graph</div>
+    <div class="dtitle">{{ doc_name }}</div>
+    <div class="badge">{{ stats }}</div>
+  </div>
+  <div style="display:flex;gap:7px">
+    <button class="btn btn-o" onclick="resetView()">⟳ Reset</button>
+    <button class="btn btn-o" onclick="togglePhysics()">⏸ Fisica</button>
+    <button class="btn btn-a" onclick="exportPNG()">↓ PNG</button>
+  </div>
+</header>
+<div class="main">
+  <div class="sb">
+    <div class="ss">
+      <h3>Cerca</h3>
+      <input class="search" id="searchBox" placeholder="Filtra nodi…" oninput="filterNodes(this.value)">
+    </div>
+    <div class="ss">
+      <h3>Layout</h3>
+      <div class="cg">
+        <div class="cb" onclick="setLayout('force')">Force</div>
+        <div class="cb" onclick="setLayout('radial')">Radiale</div>
+        <div class="cb" onclick="setLayout('grid')">Griglia</div>
+      </div>
+    </div>
+    <div class="ss">
+      <h3>Fisica</h3>
+      <div class="slider-row">
+        <label>Forza</label>
+        <input class="sli" type="range" min="10" max="300" value="100" oninput="setForce(+this.value)">
+        <span id="forceVal">100</span>
+      </div>
+      <div class="slider-row">
+        <label>Distanza</label>
+        <input class="sli" type="range" min="20" max="400" value="120" oninput="setDist(+this.value)">
+        <span id="distVal">120</span>
+      </div>
+    </div>
+    <div class="ls" id="legend">{{ legend_items }}</div>
+    <div class="ts">⏱ {{ timestamp }}</div>
+  </div>
+  <div id="wrap">
+    <canvas id="c"></canvas>
+    <div id="tip"></div>
+    <div id="info">
+      <span class="xi" onclick="closeInfo()">✕</span>
+      <h4 id="infoTitle"></h4>
+      <div class="it" id="infoType"></div>
+      <div id="infoBody"></div>
+    </div>
+  </div>
+</div>
+<script>
+const RAW_NODES = {{ nodes_json }};
+const RAW_EDGES = {{ edges_json }};
+// ── Il codice JS è identico al template inline in renderer.py ──────────────
+// (includi qui il blocco <script> completo del renderer.py se usi Jinja2)
+// Per ora, importa da renderer.py via build_html() che genera il JS inline.
+// Questo file serve come punto di partenza per personalizzazioni avanzate.
+</script>
+</body>
+</html>
