@@ -100,8 +100,8 @@ def merge_graphs(graph_list: list[dict]) -> dict:
                 # Merge properties
                 existing = all_nodes[existing_key]
                 existing["properties"] = {
-                    **existing.get("properties", {}),
-                    **node.get("properties", {}),
+                    **(existing.get("properties") or {}),
+                    **(node.get("properties") or {}),
                 }
                 if not existing.get("description") and node.get("description"):
                     existing["description"] = node["description"]
@@ -114,8 +114,8 @@ def merge_graphs(graph_list: list[dict]) -> dict:
                     "id":          global_id,
                     "label":       label,
                     "type":        ntype,
-                    "properties":  node.get("properties", {}),
-                    "description": node.get("description", ""),
+                    "properties":  node.get("properties") or {},
+                    "description": node.get("description") or "",
                 }
 
             local_map[orig_id] = global_id
@@ -128,9 +128,9 @@ def merge_graphs(graph_list: list[dict]) -> dict:
                     "source":     src,
                     "target":     tgt,
                     "type":       edge.get("type", "RELAZIONATO_A"),
-                    "label":      edge.get("label", ""),
-                    "properties": edge.get("properties", {}),
-                    "evidence":   edge.get("evidence", ""),
+                    "label":      edge.get("label") or "",
+                    "properties": edge.get("properties") or {},
+                    "evidence":   edge.get("evidence") or "",
                 })
 
     return {

@@ -71,10 +71,10 @@ def export_graphml(graph: dict, path: Path) -> None:
 
     for node in graph.get("nodes", []):
         nid   = _escape_xml(node["id"])
-        label = _escape_xml(node.get("label", ""))
+        label = _escape_xml(node.get("label") or "")
         ntype = _escape_xml(node.get("type", "Nodo"))
-        desc  = _escape_xml(node.get("description", ""))
-        props = _escape_xml(json.dumps(node.get("properties", {}), ensure_ascii=False))
+        desc  = _escape_xml(node.get("description") or "")
+        props = _escape_xml(json.dumps(node.get("properties") or {}, ensure_ascii=False))
         lines += [
             f'    <node id="{nid}">',
             f'      <data key="label">{label}</data>',
@@ -87,10 +87,10 @@ def export_graphml(graph: dict, path: Path) -> None:
     for i, edge in enumerate(graph.get("edges", [])):
         src  = _escape_xml(edge["source"])
         tgt  = _escape_xml(edge["target"])
-        etype  = _escape_xml(edge.get("type", ""))
-        elabel = _escape_xml(edge.get("label", ""))
-        evid   = _escape_xml(edge.get("evidence", ""))
-        eprops = _escape_xml(json.dumps(edge.get("properties", {}), ensure_ascii=False))
+        etype  = _escape_xml(edge.get("type") or "")
+        elabel = _escape_xml(edge.get("label") or "")
+        evid   = _escape_xml(edge.get("evidence") or "")
+        eprops = _escape_xml(json.dumps(edge.get("properties") or {}, ensure_ascii=False))
         lines += [
             f'    <edge id="e{i}" source="{src}" target="{tgt}">',
             f'      <data key="etype">{etype}</data>',
@@ -123,10 +123,10 @@ def export_neo4j_csv(graph: dict, base_path: Path) -> None:
         for node in graph.get("nodes", []):
             w.writerow([
                 node["id"],
-                node.get("label", ""),
+                node.get("label") or "",
                 node.get("type", "Nodo"),
-                node.get("description", ""),
-                json.dumps(node.get("properties", {}), ensure_ascii=False),
+                node.get("description") or "",
+                json.dumps(node.get("properties") or {}, ensure_ascii=False),
             ])
 
     with open(rels_path, "w", newline="", encoding="utf-8") as f:
@@ -138,9 +138,9 @@ def export_neo4j_csv(graph: dict, base_path: Path) -> None:
                 edge["source"],
                 edge["target"],
                 edge.get("type", "RELAZIONATO_A"),
-                edge.get("label", ""),
-                edge.get("evidence", ""),
-                json.dumps(edge.get("properties", {}), ensure_ascii=False),
+                edge.get("label") or "",
+                edge.get("evidence") or "",
+                json.dumps(edge.get("properties") or {}, ensure_ascii=False),
             ])
 
     print(f"  📊 Neo4j CSV → {nodes_path.name} + {rels_path.name}")
@@ -162,11 +162,11 @@ def export_rdf_turtle(graph: dict, path: Path, base_uri: str = "http://doc2graph
         if t not in type_map:
             type_map[t] = f"d2g:{_safe_id(t)}"
         nid = _safe_id(node["id"])
-        lbl = node.get("label", "").replace('"', '\\"')
+        lbl = (node.get("label") or "").replace('"', '\\"')
         lines.append(f"d2g:{nid}")
         lines.append(f'    rdf:type {type_map[t]} ;')
         lines.append(f'    rdfs:label "{lbl}" ;')
-        for k, v in node.get("properties", {}).items():
+        for k, v in (node.get("properties") or {}).items():
             v_str = str(v).replace('"', '\\"')
             lines.append(f'    d2g:{_safe_id(k)} "{v_str}" ;')
         lines[-1] = lines[-1].rstrip(" ;") + " ."
@@ -176,7 +176,7 @@ def export_rdf_turtle(graph: dict, path: Path, base_uri: str = "http://doc2graph
         src  = _safe_id(edge["source"])
         tgt  = _safe_id(edge["target"])
         etype = _safe_id(edge.get("type", "relazionato_a"))
-        evid  = edge.get("evidence", "").replace('"', '\\"')[:200]
+        evid  = (edge.get("evidence") or "").replace('"', '\\"')[:200]
         lines.append(f"d2g:{src} d2g:{etype} d2g:{tgt} .")
         if evid:
             lines.append(f'# evidence: "{evid}"')
@@ -197,12 +197,12 @@ def export_cypher(graph: dict, path: Path) -> None:
 
     for node in graph.get("nodes", []):
         ntype = node.get("type", "Nodo")
-        label = _escape_cypher(node.get("label", ""))
-        desc  = _escape_cypher(node.get("description", ""))
+        label = _escape_cypher(node.get("label") or "")
+        desc  = _escape_cypher(node.get("description") or "")
         prop_parts = [f"id: '{node['id']}'", f"name: '{label}'"]
         if desc:
             prop_parts.append(f"description: '{desc}'")
-        for k, v in node.get("properties", {}).items():
+        for k, v in (node.get("properties") or {}).items():
             prop_parts.append(f"{_safe_id(k)}: '{_escape_cypher(str(v))}'")
         lines.append(f"MERGE (:{ntype} {{{', '.join(prop_parts)}}});")
 
@@ -210,14 +210,14 @@ def export_cypher(graph: dict, path: Path) -> None:
 
     for edge in graph.get("edges", []):
         etype = edge.get("type", "RELAZIONATO_A")
-        lbl   = _escape_cypher(edge.get("label", ""))
-        evid  = _escape_cypher(edge.get("evidence", ""))[:200]
+        lbl   = _escape_cypher(edge.get("label") or "")
+        evid  = _escape_cypher(edge.get("evidence") or "")[:200]
         prop_parts = []
         if lbl:
             prop_parts.append(f"label: '{lbl}'")
         if evid:
             prop_parts.append(f"evidence: '{evid}'")
-        for k, v in edge.get("properties", {}).items():
+        for k, v in (edge.get("properties") or {}).items():
             prop_parts.append(f"{_safe_id(k)}: '{_escape_cypher(str(v))}'")
         props_str = f" {{{', '.join(prop_parts)}}}" if prop_parts else ""
         lines.append(

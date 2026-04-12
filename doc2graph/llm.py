@@ -266,8 +266,8 @@ def enrich_relations(graph: dict) -> dict:
 
     to_enrich = [
         i for i, e in enumerate(graph["edges"])
-        if e.get("type", "").upper() in GENERIC_TYPES
-        or not e.get("label", "").strip()
+        if e.get("type") or "".upper() in GENERIC_TYPES
+        or not e.get("label") or "".strip()
     ]
 
     if not to_enrich:
@@ -287,10 +287,10 @@ def enrich_relations(graph: dict) -> dict:
                 "_idx": i,
                 "source": node_map.get(e["source"], e["source"]),
                 "target": node_map.get(e["target"], e["target"]),
-                "type":   e.get("type", ""),
-                "label":  e.get("label", ""),
-                "properties": e.get("properties", {}),
-                "evidence": e.get("evidence", ""),
+                "type":   e.get("type") or "",
+                "label":  e.get("label") or "",
+                "properties": e.get("properties") or {},
+                "evidence": e.get("evidence") or "",
             })
 
         payload = json.dumps({"edges": batch_edges}, ensure_ascii=False)
@@ -323,11 +323,11 @@ def enrich_relations(graph: dict) -> dict:
 
                 e = graph["edges"][orig_idx]
                 new_type = (
-                    item.get("type", e.get("type", ""))
+                    item.get("type", e.get("type") or "")
                     .strip().upper().replace(" ", "_")
                 )
-                new_label = item.get("label", e.get("label", "")).strip()
-                new_props = item.get("properties", {})
+                new_label = item.get("label", e.get("label") or "").strip()
+                new_props = item.get("properties") or {}
 
                 if new_type and new_type not in GENERIC_TYPES:
                     e["type"] = new_type
@@ -335,7 +335,7 @@ def enrich_relations(graph: dict) -> dict:
                 if new_label:
                     e["label"] = new_label
                 if new_props:
-                    e["properties"] = {**e.get("properties", {}), **new_props}
+                    e["properties"] = {**(e.get("properties") or {}), **new_props}
 
         except Exception as exc:
             print(f"\n  ⚠️  Errore batch arricchimento: {exc}")
@@ -364,7 +364,7 @@ def llm_verify_relations(graph: dict, batch_size: int = 20) -> dict:
         batch = graph["edges"][b_start: b_start + batch_size]
         edges_text = "\n".join(
             f'{j}. {node_map.get(e["source"], "?")} --[{e["type"]}]--> '
-            f'{node_map.get(e["target"], "?")} | evidence: "{e.get("evidence", "")}"'
+            f'{node_map.get(e["target"], "?")} | evidence: "{e.get("evidence") or ""}"'
             for j, e in enumerate(batch)
         )
         prompt = f"Valuta le seguenti relazioni:\n\n{edges_text}"

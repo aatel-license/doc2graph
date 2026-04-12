@@ -38,14 +38,14 @@ def build_html(graph: dict, doc_name: str, output_path: Path) -> None:
 
     js_nodes = []
     for node in nodes:
-        color = type_color.get(node.get("type", "Nodo"), "#4C8EDA")
+        color = type_color.get(node.get("type") or "Nodo", "#4C8EDA")
         js_nodes.append({
             "id":    node["id"],
-            "label": node.get("label", ""),
-            "type":  node.get("type", "Nodo"),
+            "label": node.get("label") or "",
+            "type":  node.get("type") or "Nodo",
             "color": color,
-            "desc":  node.get("description", ""),
-            "props": node.get("properties", {}),
+            "desc":  node.get("description") or "",
+            "props": node.get("properties") or {},
         })
 
     js_edges = []
@@ -53,10 +53,10 @@ def build_html(graph: dict, doc_name: str, output_path: Path) -> None:
         js_edges.append({
             "source":   edge["source"],
             "target":   edge["target"],
-            "type":     edge.get("type", ""),
-            "label":    edge.get("label", ""),
-            "props":    edge.get("properties", {}),
-            "evidence": edge.get("evidence", ""),
+            "type":     edge.get("type") or "",
+            "label":    edge.get("label") or "",
+            "props":    edge.get("properties") or {},
+            "evidence": edge.get("evidence") or "",
         })
 
     legend_items = "".join(
@@ -70,9 +70,9 @@ def build_html(graph: dict, doc_name: str, output_path: Path) -> None:
 
     cypher_lines = []
     for node in nodes:
-        props = node.get("properties", {})
-        ntype = node.get("type", "Nodo")
-        label = node.get("label", "").replace("'", "\\'")
+        props = node.get("properties") or {}
+        ntype = node.get("type") or "Nodo"
+        label = (node.get("label") or "").replace("'", "\\'")
         prop_str = ", ".join(
             f"{k}: '{str(v).replace(chr(39), chr(92)+chr(39))}'"
             for k, v in props.items()
@@ -82,9 +82,9 @@ def build_html(graph: dict, doc_name: str, output_path: Path) -> None:
         else:
             cypher_lines.append(f"CREATE (:{ntype} {{id: '{node['id']}', name: '{label}'}});")
     for edge in edges:
-        ev     = edge.get("evidence", "").replace("'", "\\'")[:80]
-        lbl    = edge.get("label", "").replace("'", "\\'")
-        eprops = edge.get("properties", {})
+        ev     = (edge.get("evidence") or "").replace("'", "\\'")[:80]
+        lbl    = (edge.get("label") or "").replace("'", "\\'")
+        eprops = edge.get("properties") or {}
         prop_parts = [f"evidence:'{ev}'"]
         if lbl:
             prop_parts.append(f"label:'{lbl}'")
